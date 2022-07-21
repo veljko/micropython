@@ -381,6 +381,11 @@ STATIC mp_obj_t network_cyw43_config(size_t n_args, const mp_obj_t *args, mp_map
                 cyw43_ioctl(self->cyw, CYW43_IOCTL_GET_VAR, 13, buf, self->itf);
                 return MP_OBJ_NEW_SMALL_INT(nw_get_le32(buf) / 4);
             }
+            case MP_QSTR_pm: {
+                uint32_t pm = 0;
+                cyw43_wifi_get_pm(self->cyw, &pm); // 0x00adbrrm
+                return mp_obj_new_int_from_uint(pm);
+            }
             default:
                 mp_raise_ValueError(MP_ERROR_TEXT("unknown config param"));
         }
