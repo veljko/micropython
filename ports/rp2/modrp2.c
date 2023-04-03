@@ -32,9 +32,14 @@
 #include "hardware/sync.h"
 #include "hardware/structs/ioqspi.h"
 #include "hardware/structs/sio.h"
+#include "hardware/adc.h"
 
 #if MICROPY_PY_NETWORK_CYW43
 #include "extmod/modnetwork.h"
+#endif
+
+#if CYW43_USES_VSYS_PIN || CYW43_WL_GPIO_VBUS_PIN
+#include "lib/cyw43-driver/src/cyw43.h"
 #endif
 
 #if MICROPY_PY_NETWORK_CYW43
@@ -81,6 +86,82 @@ STATIC mp_obj_t rp2_bootsel_button(void) {
 }
 MP_DEFINE_CONST_FUN_OBJ_0(rp2_bootsel_button_obj, rp2_bootsel_button);
 
+STATIC mp_obj_t rp2_power_source_battery(void) {
+    bool vbus;
+#if defined CYW43_WL_GPIO_VBUS_PIN
+    cyw43_gpio_get(&cyw43_state, CYW43_WL_GPIO_VBUS_PIN, &vbus);
+#elif defined PICO_VBUS_GPIO_PIN
+    gpio_set_function(PICO_VBUS_GPIO_PIN, GPIO_FUNC_SIO);
+    vbus = gpio_get(PICO_VBUS_GPIO_PIN);
+#else
+    mp_raise_NotImplementedError(MP_ERROR_TEXT("power_source not supported"));
+#endif
+    return MP_OBJ_NEW_SMALL_INT(!vbus);
+}
+
+MP_DEFINE_CONST_FUN_OBJ_0(rp2_power_source_battery_obj, rp2_power_source_battery);
+
+#ifndef PICO_POWER_SAMPLE_COUNT
+#define PICO_POWER_SAMPLE_COUNT 3
+#endif
+
+// Pin used for ADC 0
+#define PICO_FIRST_ADC_PIN 26
+
+STATIC mp_obj_t rp2_power_voltage(void) {
+    float voltage_result;
+#ifndef PICO_VSYS_PIN
+    mp_raise_NotImplementedError(MP_ERROR_TEXT("power_voltage not supported"));
+#endif
+#if CYW43_USES_VSYS_PIN
+    CYW43_THREAD_ENTER;
+    // Make sure cyw43 is awake
+    bool battery_powered;
+    cyw43_gpio_get(&cyw43_state, CYW43_WL_GPIO_VBUS_PIN, &battery_powered);
+    (void)battery_powered;
+#endif
+
+    // Initialise the ADC peripheral if it's not already running.
+    if (!(adc_hw->cs & ADC_CS_EN_BITS)) {
+        adc_init();
+    }
+
+    // setup adc
+    adc_gpio_init(PICO_VSYS_PIN);
+    adc_select_input(PICO_VSYS_PIN - PICO_FIRST_ADC_PIN);
+ 
+    adc_fifo_setup(true, false, 0, false, false);
+    adc_run(true);
+
+#if CYW43_USES_VSYS_PIN
+    // We seem to read low values from cyw43 sometimes - this seems to fix it
+    int ignore_count = PICO_POWER_SAMPLE_COUNT;
+    while (!adc_fifo_is_empty() || ignore_count-- > 0) {
+        (void)adc_fifo_get_blocking();
+    }
+#endif
+
+    // read vsys
+    uint32_t vsys = 0;
+    for(int i = 0; i < PICO_POWER_SAMPLE_COUNT; i++) {
+        uint16_t val = adc_fifo_get_blocking();
+        vsys += val;
+    }
+
+    adc_run(false);
+    adc_fifo_drain();
+
+    vsys /= PICO_POWER_SAMPLE_COUNT;
+#if CYW43_USES_VSYS_PIN
+    CYW43_THREAD_EXIT;
+#endif
+    // Generate voltage
+    const float conversion_factor = 3.3f / (1 << 12);
+    voltage_result = vsys * 3 * conversion_factor;
+    return mp_obj_new_float(voltage_result);
+}
+
+MP_DEFINE_CONST_FUN_OBJ_0(rp2_power_voltage_obj, rp2_power_voltage);
 
 STATIC const mp_rom_map_elem_t rp2_module_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR___name__),            MP_ROM_QSTR(MP_QSTR_rp2) },
@@ -88,6 +169,8 @@ STATIC const mp_rom_map_elem_t rp2_module_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR_PIO),                 MP_ROM_PTR(&rp2_pio_type) },
     { MP_ROM_QSTR(MP_QSTR_StateMachine),        MP_ROM_PTR(&rp2_state_machine_type) },
     { MP_ROM_QSTR(MP_QSTR_bootsel_button),      MP_ROM_PTR(&rp2_bootsel_button_obj) },
+    { MP_ROM_QSTR(MP_QSTR_power_source_battery),MP_ROM_PTR(&rp2_power_source_battery_obj) },
+    { MP_ROM_QSTR(MP_QSTR_power_voltage),       MP_ROM_PTR(&rp2_power_voltage_obj) },
 
     #if MICROPY_PY_NETWORK_CYW43
     // Deprecated (use network.country instead).
